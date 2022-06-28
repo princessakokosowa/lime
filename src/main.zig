@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 
 const zwin32 = @import("zwin32");
 const win32 = zwin32.base;
+const direct3d12 = zwin32.d3d12;
 
 fn processMessages(
     window: win32.HWND,
@@ -45,6 +46,8 @@ pub fn handleWindowEvents() bool {
 pub fn main() !void {
     var instance = win32.kernel32.GetModuleHandleW(null);
     var cursor = win32.LoadCursorA(@ptrCast(win32.HINSTANCE, instance), @intToPtr(win32.LPCSTR, 32512));
+    //                                                                                          ^^^^^ IDC_ARROW
+
     var name = "lime";
 
     const window_class = win32.user32.WNDCLASSEXA{
@@ -81,18 +84,18 @@ pub fn main() !void {
     const window_style_parameters = rectangle_adjustment_parameters | win32.user32.WS_VISIBLE;
 
     const window = try win32.user32.createWindowExA(
-        0,
+        0, // dwExStyle
         name,
         name,
         window_style_parameters,
-        -1, // CW_USEDEFAULT
-        -1, // CW_USEDEFAULT
+        win32.user32.CW_USEDEFAULT,
+        win32.user32.CW_USEDEFAULT,
         rectangle.right - rectangle.left,
         rectangle.bottom - rectangle.top,
-        null,
-        null,
+        null, // hWndParent
+        null, // hMenu
         window_class.hInstance,
-        null,
+        null, // lpParam
     );
 
     _ = window;
