@@ -12,6 +12,9 @@ const direct3d12 = zwin32.d3d12;
 //
 // Most of TODOs here concern this.
 //
+// Also, some of the procedures from WinAPI are there in the standard library, but some (e.g.
+// LoadCursorA) are not, hence the different naming style.
+//
 //     princessakokosowa, 29 June 2022
 
 const Window = struct {
@@ -47,7 +50,6 @@ const Window = struct {
 
             // @TODO
             // 32512 is IDC_ARROW
-            // @intCast(isize, @ptrToInt(self)) is (LONG_PTR)(self), in C style
             .hCursor = win32.LoadCursorA(null, @intToPtr(win32.LPCSTR, 32512)),
             .hbrBackground = null,
             .lpszMenuName = null,
@@ -85,10 +87,9 @@ const Window = struct {
         );
 
         // @TODO
-        // -21                              is GWLP_USERDATA
-        // @intCast(isize, @ptrToInt(self)) is (LONG_PTR)(self), in C style
-        _ = win32.user32.SetWindowLongPtrA(window, -21,              @intCast(isize, @ptrToInt(self)));
-        _ = win32.user32.ShowWindow(window, win32.user32.SW_SHOWDEFAULT);
+        // -21 is GWLP_USERDATA
+        _ = try win32.user32.setWindowLongPtrA(window, -21, @intCast(isize, @ptrToInt(self)));
+        _ = win32.user32.showWindow(window, win32.user32.SW_SHOWDEFAULT);
 
         self.* = .{
             .window = window,
@@ -102,7 +103,8 @@ const Window = struct {
         return self;
     }
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) !void {
+        try win32.user32.destroyWindow(self.window);
         allocator.destroy(self);
     }
 
@@ -115,11 +117,11 @@ const Window = struct {
         switch (message) {
             win32.user32.WM_KEYDOWN => {
                 if (wparam == win32.VK_ESCAPE) {
-                    win32.user32.PostQuitMessage(0);
+                    win32.user32.postQuitMessage(0);
                 }
             },
             win32.user32.WM_DESTROY => {
-                win32.user32.PostQuitMessage(0);
+                win32.user32.postQuitMessage(0);
             },
             else => {
                 return win32.user32.defWindowProcA(window, message, wparam, lparam);
@@ -145,6 +147,25 @@ const Window = struct {
     }
 };
 
+const Context = struct {
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator, window: Window) !*Self {
+        var self = try allocator.create(Self);
+
+        _ = window;
+
+        // self.* = .{
+        // };
+
+        return self;
+    }
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.destroy(self);
+    }
+};
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -152,7 +173,9 @@ pub fn main() !void {
     const allocator = arena.allocator();
 
     var window = try Window.init(allocator, 1280, 720, null);
-    defer window.deinit(allocator);
+    errdefer try window.deinit(allocator);
+
+    _ = window;
 
     while (Window.handleEvents()) {
        // loooooooooop
