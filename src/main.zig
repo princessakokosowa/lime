@@ -3,7 +3,13 @@ const assert = std.debug.assert;
 
 const zwin32 = @import("zwin32");
 const win32 = zwin32.base;
+const dxgi = zwin32.dxgi;
 const direct3d12 = zwin32.d3d12;
+const direct3d12d = zwin32.d3d12d;
+const HResultError = zwin32.HResultError;
+const hrPanic = zwin32.hrPanic;
+const hrPanicOnFail = zwin32.hrPanicOnFail;
+const hrErrorOnFail = zwin32.hrErrorOnFail;
 
 // @NOTE
 // Bindings to WinAPI sometimes look miserable (or I just don't yet understand where the various
@@ -18,6 +24,10 @@ const direct3d12 = zwin32.d3d12;
 //     princessakokosowa, 29 June 2022
 
 const Window = struct {
+    const Flags = i32;
+
+    pub const maximize_window: Flags = 1 << 0;
+
     window: win32.HWND,
 
     is_minimized: bool = false,
@@ -36,7 +46,7 @@ const Window = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, window_width: i32, window_height: i32, window_title: ?[*:0]const u8) !*Self {
+    pub fn init(allocator: std.mem.Allocator, window_width: i32, window_height: i32, window_title: ?[*:0]const u8, flags: Flags) !*Self {
         var self = try allocator.create(Self);
 
         var window_class: win32.user32.WNDCLASSEXA = .{
@@ -89,22 +99,18 @@ const Window = struct {
         // @TODO
         // -21 is GWLP_USERDATA
         _ = try win32.user32.setWindowLongPtrA(window, -21, @intCast(isize, @ptrToInt(self)));
-        _ = win32.user32.showWindow(window, win32.user32.SW_SHOWDEFAULT);
+        _ = win32.user32.showWindow(window, if ((flags & maximize_window) != 0) win32.user32.SW_SHOWMAXIMIZED else win32.user32.SW_SHOWDEFAULT);
 
         self.* = .{
             .window = window,
-            .is_minimized = false,
-            .is_maximized = false,
-            .is_close_requested = false,
-            .is_key_down = undefined,
-            .is_previous_key_down = undefined,
         };
 
         return self;
     }
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) !void {
-        try win32.user32.destroyWindow(self.window);
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        // try win32.user32.destroyWindow(self.window);
+        _ = win32.user32.DestroyWindow(self.window);
         allocator.destroy(self);
     }
 
@@ -148,12 +154,116 @@ const Window = struct {
 };
 
 const Context = struct {
+    const Flags = i32;
+
+    pub const enable_debug_layer: Flags = 1 << 0;
+
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, window: Window) !*Self {
+    pub fn init(allocator: std.mem.Allocator, window: *Window, flags: Flags) !*Self {
         var self = try allocator.create(Self);
 
+        if ((flags & enable_debug_layer) != 0) {
+            var debug_controller: ?*direct3d12d.IDebug1 = null;
+            _ = direct3d12.D3D12GetDebugInterface(&direct3d12d.IID_IDebug1, @ptrCast(*?*anyopaque, &debug_controller));
+            
+            if (debug_controller) |debug_controller_| {
+                debug_controller_.EnableDebugLayer();
+                // debug_controller_.SetEnableGPUBasedValidation(win32.TRUE);
+                debug_controller_.SetEnableSynchronizedCommandQueueValidation(win32.TRUE);
+                _ = debug_controller_.Release();
+            }
+        }
+
+        const factory = blk: {
+            var factory: *dxgi.IFactory6 = undefined;
+
+            hrPanicOnFail(dxgi.CreateDXGIFactory2(
+                if ((flags & enable_debug_layer) != 0) dxgi.CREATE_FACTORY_DEBUG else 0,
+                &dxgi.IID_IFactory6,
+                @ptrCast(*?*anyopaque, &factory),
+            ));
+
+            break :blk factory;
+        };
+        defer _ = factory.Release();
+
+        const device = blk: {
+            // That's the maximum number of adapters you can have on Windows.
+            const adapters_count = 8;
+            var adapters: [adapters_count]?*dxgi.IAdapter1 = undefined;
+            var adapter_descs: [adapters_count]dxgi.ADAPTER_DESC1 = undefined;
+            var adapter_scores: [adapters_count]i32 = undefined;
+
+            var i: usize = 0;
+            while (i < adapters_count) : (i += 1) {
+                var adapter: ?*dxgi.IAdapter1 = null;
+                var adapter_desc: dxgi.ADAPTER_DESC1 = undefined;
+
+                if (factory.EnumAdapters1(@intCast(u32, i), &adapter) != win32.S_OK) {
+                    break;
+                }
+
+                var adapter_score: i32 = 0;
+                if (adapter) |adapter_| {
+                    _ = adapter_.GetDesc1(&adapter_desc); // != win32.S_OK, but at this point, there's no use.
+    
+                    if ((adapter_desc.Flags & dxgi.ADAPTER_FLAG_SOFTWARE) != 0) {
+                        adapter_score = 0;
+                    } else {
+                        switch (adapter_desc.VendorId) {
+                            0x10DE => adapter_score = 3,
+                            0x1002 => adapter_score = 2,
+                            else => adapter_score = 1,
+                        }
+    
+                        var j: usize = 0;
+                        while (j < i) : (j += 1) {
+                            const has_higher_score = adapter_score > adapter_scores[j];
+                            const has_the_same_score = adapter_score == adapter_scores[j];
+                            const has_more_dedicated_video_memory = has_the_same_score and adapter_desc.DedicatedVideoMemory > adapter_descs[j].DedicatedVideoMemory;
+    
+                            if (has_higher_score or has_more_dedicated_video_memory) {
+                                break;
+                            }
+                        }
+    
+                        var k = i;
+                        while (k > j) : (k -= 1) {
+                            adapters[k] = adapters[k - 1];
+                            adapter_descs[k] = adapter_descs[k - 1];
+                            adapter_scores[k] = adapter_scores[k - 1];
+                        }
+    
+                        adapters[j] = adapter_;
+                        adapter_descs[j] = adapter_desc;
+                        adapter_scores[j] = adapter_score;
+                    }
+                }
+            }
+
+            defer {
+                for (adapters) |adapter| {
+                    if (adapter) |adapter_| {
+                        _ = adapter_.Release();
+                    }
+                }
+            }
+
+            var device: *direct3d12.IDevice9 = undefined;
+
+            for (adapters) |adapter| {
+                if (direct3d12.D3D12CreateDevice(if (adapter) |adapter_| @ptrCast(*win32.IUnknown, adapter_) else null, .FL_12_1, &direct3d12.IID_IDevice9, @ptrCast(*?*anyopaque, &device)) == win32.S_OK) {
+                    break;
+                }
+            }
+
+            break :blk device;
+        };
+
+        _ = device;
         _ = window;
+        _ = flags;
 
         // self.* = .{
         // };
@@ -172,10 +282,17 @@ pub fn main() !void {
 
     const allocator = arena.allocator();
 
-    var window = try Window.init(allocator, 1280, 720, null);
-    errdefer try window.deinit(allocator);
+    const window_flags: Window.Flags = 0;
+    var window = try Window.init(allocator, 1280, 720, null, window_flags);
+    // defer try window.deinit(allocator);
+    defer window.deinit(allocator);
+
+    const context_flags: Context.Flags = Context.enable_debug_layer;
+    var context = try Context.init(allocator, window, context_flags);
+    defer context.deinit(allocator);
 
     _ = window;
+    _ = context;
 
     while (Window.handleEvents()) {
        // loooooooooop
