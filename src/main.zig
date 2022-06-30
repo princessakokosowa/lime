@@ -158,6 +158,8 @@ const Context = struct {
 
     pub const enable_debug_layer: Flags = 1 << 0;
 
+    device: *direct3d12.IDevice,
+
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, flags: Flags) !*Self {
@@ -188,10 +190,10 @@ const Context = struct {
         };
         defer _ = factory.Release();
 
-        const device = blk: {
+        const suitable_adapters = blk: {
             // That's the maximum number of adapters you can have on Windows.
             const adapters_count = 8;
-            var adapters: [adapters_count]?*dxgi.IAdapter1 = undefined;
+            var adapters: [adapters_count]?*dxgi.IAdapter1 = .{ null } ** adapters_count;
             var adapter_descs: [adapters_count]dxgi.ADAPTER_DESC1 = undefined;
             var adapter_scores: [adapters_count]i32 = undefined;
 
@@ -216,62 +218,67 @@ const Context = struct {
                             0x1002 => adapter_score = 2,
                             else => adapter_score = 1,
                         }
-    
-                        var j: usize = 0;
-                        while (j < i) : (j += 1) {
-                            const has_higher_score = adapter_score > adapter_scores[j];
-                            const has_the_same_score = adapter_score == adapter_scores[j];
-                            const has_more_dedicated_video_memory = has_the_same_score and adapter_desc.DedicatedVideoMemory > adapter_descs[j].DedicatedVideoMemory;
-    
-                            if (has_higher_score or has_more_dedicated_video_memory) {
-                                break;
-                            }
-                        }
-    
-                        var k = i;
-                        while (k > j) : (k -= 1) {
-                            adapters[k] = adapters[k - 1];
-                            adapter_descs[k] = adapter_descs[k - 1];
-                            adapter_scores[k] = adapter_scores[k - 1];
-                        }
-    
-                        adapters[j] = adapter_;
-                        adapter_descs[j] = adapter_desc;
-                        adapter_scores[j] = adapter_score;
                     }
-                }
-            }
 
-            defer {
-                for (adapters) |adapter| {
-                    if (adapter) |adapter_| {
-                        _ = adapter_.Release();
+                    var j: usize = 0;
+                    while (j < i) : (j += 1) {
+                        const has_higher_score = adapter_score > adapter_scores[j];
+                        const has_the_same_score = adapter_score == adapter_scores[j];
+                        const has_more_dedicated_video_memory = has_the_same_score and adapter_desc.DedicatedVideoMemory > adapter_descs[j].DedicatedVideoMemory;
+
+                        if (has_higher_score or has_more_dedicated_video_memory) {
+                            break;
+                        }
                     }
+
+                    var k = i;
+                    while (k > j) : (k -= 1) {
+                        adapters[k] = adapters[k - 1];
+                        adapter_descs[k] = adapter_descs[k - 1];
+                        adapter_scores[k] = adapter_scores[k - 1];
+                    }
+
+                    adapters[j] = adapter_;
+                    adapter_descs[j] = adapter_desc;
+                    adapter_scores[j] = adapter_score;
                 }
             }
 
-            var device: *direct3d12.IDevice9 = undefined;
-
-            for (adapters) |adapter| {
-                if (direct3d12.D3D12CreateDevice(if (adapter) |adapter_| @ptrCast(*win32.IUnknown, adapter_) else null, .FL_12_1, &direct3d12.IID_IDevice9, @ptrCast(*?*anyopaque, &device)) == win32.S_OK) {
-                    break;
-                }
-            }
-
-            break :blk device;
+            break :blk adapters;
         };
+        defer {
+            for (suitable_adapters) |adapter| {
+                if (adapter) |adapter_| {
+                    _ = adapter_.Release();
+                }
+            }
+        }
 
-        _ = device;
+        var device: *direct3d12.IDevice = undefined;
+
+        for (suitable_adapters) |adapter| {
+            if (direct3d12.D3D12CreateDevice(
+                if (adapter) |adapter_| @ptrCast(*win32.IUnknown, adapter_) else null,
+                .FL_12_1,
+                &direct3d12.IID_IDevice,
+                @ptrCast(*?*anyopaque, &device),
+            ) == win32.S_OK) {
+                break;
+            }
+        }
+
         _ = window;
-        _ = flags;
 
-        // self.* = .{
-        // };
+        self.* = .{
+           .device = device,
+        };
 
         return self;
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        _ = self.device.Release();
+
         allocator.destroy(self);
     }
 };
