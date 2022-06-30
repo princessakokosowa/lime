@@ -157,6 +157,7 @@ const Context = struct {
     const Flags = i32;
 
     pub const enable_debug_layer: Flags = 1 << 0;
+    pub const enable_stable_power_state: Flags = 1 << 1;
 
     device: *direct3d12.IDevice,
 
@@ -166,34 +167,48 @@ const Context = struct {
         var self = try allocator.create(Self);
 
         if ((flags & enable_debug_layer) != 0) {
-            var debug_controller: ?*direct3d12d.IDebug1 = null;
-            _ = direct3d12.D3D12GetDebugInterface(&direct3d12d.IID_IDebug1, @ptrCast(*?*anyopaque, &debug_controller));
+            var debug_controller = blk: {
+                var maybe_debug_controller: ?*direct3d12d.IDebug1 = null;
+
+                _ = direct3d12.D3D12GetDebugInterface(
+                    &direct3d12d.IID_IDebug1,
+                    @ptrCast(*?*anyopaque, &maybe_debug_controller)
+                );
+
+                if (maybe_debug_controller == null) {
+                    return error.UnableToCreateDebugController;
+                }
+
+                break :blk maybe_debug_controller.?;
+            };
             
-            if (debug_controller) |debug_controller_| {
-                debug_controller_.EnableDebugLayer();
-                // debug_controller_.SetEnableGPUBasedValidation(win32.TRUE);
-                debug_controller_.SetEnableSynchronizedCommandQueueValidation(win32.TRUE);
-                _ = debug_controller_.Release();
-            }
+            debug_controller.EnableDebugLayer();
+            // debug_controller.SetEnableGPUBasedValidation(win32.TRUE);
+            debug_controller.SetEnableSynchronizedCommandQueueValidation(win32.TRUE);
+            _ = debug_controller.Release();
         }
 
-        const factory = blk: {
-            var factory: *dxgi.IFactory6 = undefined;
+        var factory = blk: {
+            var maybe_factory: ?*dxgi.IFactory6 = null;
 
             hrPanicOnFail(dxgi.CreateDXGIFactory2(
                 if ((flags & enable_debug_layer) != 0) dxgi.CREATE_FACTORY_DEBUG else 0,
                 &dxgi.IID_IFactory6,
-                @ptrCast(*?*anyopaque, &factory),
+                @ptrCast(*?*anyopaque, &maybe_factory),
             ));
 
-            break :blk factory;
+            if (maybe_factory == null) {
+                return error.UnableToCreateFactory;
+            }
+
+            break :blk maybe_factory.?;
         };
         defer _ = factory.Release();
 
-        const suitable_adapters = blk: {
+        var adapters = blk: {
             // That's the maximum number of adapters you can have on Windows.
             const adapters_count = 8;
-            var adapters: [adapters_count]?*dxgi.IAdapter1 = .{ null } ** adapters_count;
+            var maybe_adapters: [adapters_count]?*dxgi.IAdapter1 = .{ null } ** adapters_count;
             var adapter_descs: [adapters_count]dxgi.ADAPTER_DESC1 = undefined;
             var adapter_scores: [adapters_count]i32 = undefined;
 
@@ -233,37 +248,65 @@ const Context = struct {
 
                     var k = i;
                     while (k > j) : (k -= 1) {
-                        adapters[k] = adapters[k - 1];
+                        maybe_adapters[k] = maybe_adapters[k - 1];
                         adapter_descs[k] = adapter_descs[k - 1];
                         adapter_scores[k] = adapter_scores[k - 1];
                     }
 
-                    adapters[j] = adapter_;
+                    maybe_adapters[j] = adapter_;
                     adapter_descs[j] = adapter_desc;
                     adapter_scores[j] = adapter_score;
                 }
             }
 
-            break :blk adapters;
+            break :blk maybe_adapters;
         };
         defer {
-            for (suitable_adapters) |adapter| {
+            for (adapters) |adapter| {
                 if (adapter) |adapter_| {
                     _ = adapter_.Release();
                 }
             }
         }
 
-        var device: *direct3d12.IDevice = undefined;
+        var device = blk: {
+            var maybe_device: ?*direct3d12.IDevice = undefined;
 
-        for (suitable_adapters) |adapter| {
-            if (direct3d12.D3D12CreateDevice(
-                if (adapter) |adapter_| @ptrCast(*win32.IUnknown, adapter_) else null,
-                .FL_12_1,
-                &direct3d12.IID_IDevice,
-                @ptrCast(*?*anyopaque, &device),
-            ) == win32.S_OK) {
-                break;
+            for (adapters) |adapter| {
+                if (direct3d12.D3D12CreateDevice(
+                    if (adapter) |adapter_| @ptrCast(*win32.IUnknown, adapter_) else null,
+                    .FL_12_1,
+                    &direct3d12.IID_IDevice,
+                    @ptrCast(*?*anyopaque, &maybe_device),
+                ) == win32.S_OK) {
+                    break;
+                }
+            }
+
+            if (maybe_device == null) {
+                return error.UnableToCreateDevice;
+            }
+
+            break :blk maybe_device.?;
+        };
+
+        if ((flags & enable_stable_power_state) != 0 and device.SetStablePowerState(win32.TRUE) != win32.S_OK) {
+            std.debug.print("Couldn't set stable power state, is _developer mode_ enabled?\n", .{});
+
+            // At this point, the device crashed. Recreating it.
+            _ = device.Release();
+
+            // Also, we don't care about it being `null` anymore as previously this wasn't a
+            // problem.
+            for (adapters) |adapter| {
+                if (direct3d12.D3D12CreateDevice(
+                    if (adapter) |adapter_| @ptrCast(*win32.IUnknown, adapter_) else null,
+                    .FL_12_1,
+                    &direct3d12.IID_IDevice,
+                    @ptrCast(*?*anyopaque, &device),
+                ) == win32.S_OK) {
+                    break;
+                }
             }
         }
 
@@ -294,7 +337,7 @@ pub fn main() !void {
     // defer try window.deinit(allocator);
     defer window.deinit(allocator);
 
-    const context_flags: Context.Flags = Context.enable_debug_layer;
+    const context_flags: Context.Flags = Context.enable_debug_layer | Context.enable_stable_power_state;
     var context = try Context.init(allocator, window, context_flags);
     defer context.deinit(allocator);
 
